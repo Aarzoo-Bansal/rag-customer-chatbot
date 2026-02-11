@@ -7,9 +7,12 @@ dependencies:
   - pip:
       - langchain==0.3.25
       - langchain-community==0.3.24
+      - langchain-huggingface==0.1.2
       - sentence-transformers==4.1.0
       - streamlit==1.45.1
+      - langchain-ollama==0.3.2
       - openai==1.79.0
       - faiss-cpu==1.11.0
       - unstructured==0.17.2
+      - packaging==24.2
       - ipykernel==7.1.0
