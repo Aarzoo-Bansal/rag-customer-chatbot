@@ -1,6 +1,6 @@
 # Customer Support RAG Chatbot
 
-A hands-on project for learning how to build Retrieval-Augmented Generation (RAG) pipelines from scratch. It starts with a basic RAG implementation in a Jupyter notebook and evolves into a production-aware Streamlit chatbot with spell correction, query rewriting, and code-based reasoning.
+A hands-on project for learning how to build Retrieval-Augmented Generation (RAG) pipelines from scratch. It starts with a basic RAG implementation in a Jupyter notebook and evolves into a production-aware Streamlit chatbot with query rewriting and conversational memory.
 
 Built with LangChain, LangGraph, FAISS, and Ollama — everything runs locally, no API keys needed.
 
@@ -8,6 +8,10 @@ Built with LangChain, LangGraph, FAISS, and Ollama — everything runs locally, 
 ![LangChain](https://img.shields.io/badge/LangChain-0.3-green)
 ![LangGraph](https://img.shields.io/badge/LangGraph-0.4-orange)
 ![FAISS](https://img.shields.io/badge/FAISS-1.11-red)
+
+## Demo
+
+![Customer Support Chatbot Demo](https://github.com/Aarzoo-Bansal/rag-customer-chatbot/blob/main/ChatBot_GIF.gif)
 
 ---
 
@@ -24,7 +28,7 @@ This project walks through building a RAG system step by step:
 7. **Conversation memory** — handling multi-turn follow-up questions
 8. **LangGraph workflows** — building stateful, graph-based pipelines with conditional routing
 9. **Streamlit UI** — turning the pipeline into an interactive web app
-10. **Production patterns** — spell correction, query rewriting, code-based reasoning over retrieved context
+10. **Production patterns** — error handling, query rewriting, sliding window history
 
 ---
 
@@ -35,32 +39,20 @@ User Question
      │
      ▼
 ┌─────────────┐
-│ Spell       │  ← pyspellchecker fixes typos before embedding
-│ Correction  │
-└─────┬───────┘
-      │
-      ▼
-┌─────────────┐
 │ Query       │  ← LLM rewrites follow-ups into standalone questions
-│ Rewrite     │    (only for short, ambiguous follow-ups)
+│ Rewrite     │    (skipped if no chat history exists)
 └─────┬───────┘
       │
       ▼
 ┌─────────────┐
 │ FAISS       │  ← Embedding model converts query to vector,
-│ Retrieval   │    FAISS returns top-k similar chunks
+│ Retrieval   │    FAISS returns top-5 similar chunks
 └─────┬───────┘
       │
       ▼
-┌─────────────┐     ┌──────────────┐
-│ Extract     │────▶│ Code-based   │  ← If dates found, Python evaluates
-│ Facts (LLM) │     │ Evaluation   │    eligibility (no LLM math)
-└─────┬───────┘     └──────┬───────┘
-      │ (no dates)         │
-      ▼                    ▼
 ┌──────────────────────────┐
-│ Generate Answer (LLM)    │  ← Presents results naturally using
-│                          │    retrieved context + code conclusions
+│ Generate Answer (LLM)    │  ← Produces response using retrieved
+│                          │    context + conversation history
 └──────────────────────────┘
 ```
 
@@ -70,14 +62,14 @@ User Question
 
 ```
 .
-├── notebook.ipynb          # Step-by-step RAG tutorial (start here)
+├── rag_chatbot.ipynb          # Step-by-step RAG tutorial (start here)
 ├── app.py                  # Streamlit chatbot with LangGraph
 ├── data/
 │   ├── Everstorm_Return.pdf
 │   ├── Everstorm_Shipping.pdf
 │   ├── Everstorm_Payment.pdf
 │   └── Everstorm_Product.pdf
-├── faiss_index/            # Generated — do not commit
+├── faiss_index/            # This will be generated
 │   ├── index.faiss
 │   └── index.pkl
 ├── environment.yml         # Conda environment
@@ -157,11 +149,13 @@ Both handle multi-turn conversations through query rewriting: follow-up question
 
 ### Streamlit App (app.py)
 
-The app wraps the LangGraph pipeline in a web interface with additional production-aware features:
+The app wraps the LangGraph pipeline in a web interface with production-aware patterns:
 
-**Spell Correction** — Uses `pyspellchecker` to fix typos before they hit the embedding model. "refund poolicy" becomes "refund policy" so FAISS retrieves the right chunks. Words containing numbers are skipped to preserve "40days", "2days", etc.
+**Error Handling** — Startup checks verify that both the FAISS index and Ollama connection are available. If either is missing, the app shows a user-friendly warning instead of crashing. Runtime errors during generation are also caught and displayed gracefully.
 
-**Query Rewriting** — For short, ambiguous follow-ups (< 8 words), the LLM rewrites them as standalone questions. Longer, self-contained questions skip this step to avoid the LLM rewrite introducing errors.
+**Query Rewriting** — When chat history exists, the LLM rewrites follow-up questions into standalone search queries before retrieval. If no history exists, the raw question is used directly to avoid unnecessary LLM calls. A fallback mechanism catches bad rewrites (empty, too long, or multi-line) and reverts to the original question.
+
+**Sliding Window History** — Chat history is capped at the last 10 turns (20 messages) to keep inference fast and prevent context window overflow. The full conversation remains visible in the UI — only the LLM-facing history is trimmed.
 
 **Cached Resources** — The embedding model, FAISS index, LLM connection, and graph are loaded once using `@st.cache_resource`. Streamlit reruns the entire script on every interaction, so caching prevents expensive reloads.
 
@@ -173,13 +167,11 @@ The app wraps the LangGraph pipeline in a web interface with additional producti
 
 This project intentionally surfaces real-world RAG challenges:
 
-**Small models struggle with reasoning.** Gemma 1B and even Llama 8B gave incorrect answers to date-comparison questions ("I ordered 40 days ago but received it yesterday — can I return?"). The model would correctly state "30 days from delivery" but then conclude "not eligible." The fix: extract facts with the LLM, evaluate logic in Python code, and have the LLM present the conclusion.
+**Small models struggle with reasoning.** Gemma 1B and even Llama 8B gave incorrect answers to date-comparison questions ("I ordered 40 days ago but received it yesterday — can I return?"). The model would correctly state "30 days from delivery" but then conclude "not eligible." Careful system prompts with explicit logic guidelines help, but don't fully solve this.
 
 **Chunk size matters.** 300-character chunks retrieved the right content but sometimes returned sentence fragments. 800-character chunks provided better context but changed which chunks ranked highest. There's no universal right answer — test with your data.
 
-**Spell correction has edge cases.** Dictionary-based correction can't handle domain-specific terms or severely mangled input. Words like "2days" (no space) need special handling to preserve numbers.
-
-**Query rewriting is fragile with small models.** The 8B model sometimes answered the question instead of rewriting it, or added assumptions that biased retrieval. Strict prompts with length limits and GOOD/BAD examples help, but aren't foolproof.
+**Query rewriting is fragile with small models.** The 8B model sometimes answered the question instead of rewriting it, or added assumptions that biased retrieval. Strict prompts with explicit rules help, but a fallback to the original query is essential.
 
 **PDF extraction produces messy text.** Double spaces, broken lines, and lost formatting are common. Cleaning text with regex before embedding improves both retrieval quality and LLM comprehension.
 
@@ -226,17 +218,5 @@ Place PDFs in `data/`, update the glob pattern in `load_offline_files()`, and re
 | Orchestration | LangGraph | Stateful graph-based workflows |
 | Framework | LangChain | Document loading, text splitting, retrieval |
 | UI | Streamlit | Interactive chat interface |
-| Spell Check | pyspellchecker | Pre-retrieval query correction |
 
 ---
-
-## What's Next
-
-If you want to take this further, here are production-grade improvements to explore:
-
-- **Re-ranking** with cross-encoders (`cross-encoder/ms-marco-MiniLM-L-6-v2`) to improve retrieval precision
-- **LangGraph persistence** with SQLite/Postgres checkpointers for conversation history that survives server restarts
-- **Evaluation** using RAGAS or LLM-as-judge to measure retrieval recall and answer quality
-- **Streaming** responses token-by-token for better UX
-- **Query routing** to skip retrieval for greetings and simple questions
-- **API-based models** (GPT-4, Claude) for significantly better reasoning at the cost of API fees
