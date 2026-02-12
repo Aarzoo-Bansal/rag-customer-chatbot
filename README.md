@@ -6,7 +6,7 @@ Built with LangChain, LangGraph, FAISS, and Ollama — everything runs locally, 
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![LangChain](https://img.shields.io/badge/LangChain-0.3-green)
-![LangGraph](https://img.shields.io/badge/LangGraph-0.4-orange)
+![LangGraph](https://img.shields.io/badge/LangGraph-1.0-orange)
 ![FAISS](https://img.shields.io/badge/FAISS-1.11-red)
 
 ## Demo

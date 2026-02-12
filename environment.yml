@@ -11,7 +11,7 @@ dependencies:
       - sentence-transformers==4.1.0
       - streamlit==1.45.1
       - langchain-ollama==0.3.2
-      - openai==1.79.0
+      - langgraph==1.0.8
       - faiss-cpu==1.11.0
       - unstructured==0.17.2
       - packaging==24.2
