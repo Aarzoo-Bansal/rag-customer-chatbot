@@ -1,8 +1,6 @@
 # Customer Support RAG Chatbot
 
-A hands-on project for learning how to build Retrieval-Augmented Generation (RAG) pipelines from scratch. It starts with a basic RAG implementation in a Jupyter notebook and evolves into a production-aware Streamlit chatbot with query rewriting and conversational memory.
-
-Built with LangChain, LangGraph, FAISS, and Ollama — everything runs locally, no API keys needed.
+A conversational AI chatbot that answers customer support questions by retrieving relevant information from policy documents. Built with a 3-node LangGraph pipeline using FAISS (Meta's similarity search library) for vector retrieval and Llama 3.1 (Meta's open-source LLM) for generation — fully local, no API keys required.
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![LangChain](https://img.shields.io/badge/LangChain-0.3-green)
@@ -15,24 +13,9 @@ Built with LangChain, LangGraph, FAISS, and Ollama — everything runs locally, 
 
 ---
 
-## What You'll Learn
-
-This project walks through building a RAG system step by step:
-
-1. **Document ingestion** — loading PDFs and web pages into a unified document format
-2. **Text chunking** — splitting documents into overlapping chunks for embedding
-3. **Vector embeddings** — converting text to vectors using HuggingFace models
-4. **FAISS indexing** — building and querying a similarity search index
-5. **LLM integration** — connecting to local models via Ollama
-6. **RAG pipeline** — combining retrieval and generation into a working chatbot
-7. **Conversation memory** — handling multi-turn follow-up questions
-8. **LangGraph workflows** — building stateful, graph-based pipelines with conditional routing
-9. **Streamlit UI** — turning the pipeline into an interactive web app
-10. **Production patterns** — error handling, query rewriting, sliding window history
-
----
-
 ## Architecture
+
+The pipeline is a 3-node stateful graph built with LangGraph. Each node reads from and writes to a shared `RAGState` typed dictionary, and edges define a fixed execution order.
 
 ```
 User Question
@@ -40,21 +23,77 @@ User Question
      ▼
 ┌─────────────┐
 │ Query       │  ← LLM rewrites follow-ups into standalone questions
-│ Rewrite     │    (skipped if no chat history exists)
+│ Rewrite     │    (skipped if no chat history — avoids unnecessary LLM calls)
 └─────┬───────┘
       │
       ▼
 ┌─────────────┐
-│ FAISS       │  ← Embedding model converts query to vector,
-│ Retrieval   │    FAISS returns top-5 similar chunks
+│ FAISS       │  ← Embedding model converts query to 384-dim vector,
+│ Retrieval   │    FAISS returns top-5 similar chunks via cosine similarity
 └─────┬───────┘
       │
       ▼
 ┌──────────────────────────┐
-│ Generate Answer (LLM)    │  ← Produces response using retrieved
-│                          │    context + conversation history
+│ Generate Answer (LLM)    │  ← Produces grounded response using retrieved
+│                          │    context + sliding window chat history (10 turns)
 └──────────────────────────┘
 ```
+
+### Design Decisions
+
+**Why LangGraph over a simple chain?** LangGraph's `StateGraph` gives each node access to a shared typed state, which makes it straightforward to add new nodes (evaluation, reranking) without restructuring the pipeline. A LangChain chain would require refactoring to support conditional routing or branching.
+
+**Why FAISS over Pinecone/Chroma?** FAISS runs locally with zero infrastructure overhead, supports exact and approximate nearest-neighbor search, and handles the dataset size (44 chunks) with sub-millisecond retrieval. For this scale, a managed vector database would add latency and complexity without benefit.
+
+**Why Llama 3.1 8B via Ollama?** Keeps the entire system local and reproducible — no API keys, no rate limits, no cost per query. Temperature is set to 0 for deterministic outputs, which is essential for customer support where consistent answers matter.
+
+**Why 300-character chunks with 40-character overlap?** Tested against 500 and 800-character alternatives. Smaller chunks produced more precise retrieval for the policy documents (which contain short, self-contained policy statements), though they occasionally return sentence fragments. The overlap prevents hard cuts at sentence boundaries.
+
+---
+
+## Key Engineering Patterns
+
+**Query Rewriting with Fallback** — Follow-up questions ("what about exchanges?") are rewritten into standalone queries using chat history context. Small models sometimes answer instead of rewriting, so a validation layer checks for empty, oversized (>500 chars), or multi-line rewrites and falls back to the raw question. This prevents retrieval from being poisoned by a bad rewrite.
+
+**Sliding Window History** — Chat history is capped at the last 10 turns (20 messages) to keep inference fast and prevent context window overflow. The full conversation remains visible in the UI — only the LLM-facing history is trimmed.
+
+**Cached Resources** — The embedding model, FAISS index, LLM connection, and compiled graph are loaded once using `@st.cache_resource`. Streamlit reruns the entire script on every interaction, so without caching, every message would reload the 77MB embedding model and reconnect to Ollama.
+
+**Startup Health Checks** — The app verifies both the FAISS index and Ollama connection at startup. If either is unavailable, it shows a user-friendly warning instead of crashing mid-conversation.
+
+**Source Attribution** — Every response includes expandable source documents with file-level provenance, so the user can verify claims against the original policy text.
+
+---
+
+## Known Tradeoffs & Limitations
+
+**Dense-only retrieval misses keyword matches.** FAISS retrieves by semantic similarity, which means exact-term queries ("30-day return policy") can rank lower than semantically similar but less precise chunks. Hybrid retrieval (FAISS + BM25) would address this by combining semantic and keyword search.
+
+**No answer validation.** The pipeline trusts the LLM's output. If the retrieved context is noisy or the model hallucinates, the user sees an incorrect answer with no warning. An evaluation node that checks faithfulness (is the answer grounded in context?) before returning would catch this.
+
+**Small models struggle with multi-step reasoning.** Llama 8B correctly states policy rules but sometimes applies them incorrectly to specific scenarios (e.g., date-comparison questions). Explicit logic guidelines in the system prompt help but don't fully solve this — it's a fundamental limitation of the model size.
+
+**PDF extraction produces messy text.** PyPDFLoader outputs raw text with double spaces, broken lines, and lost table formatting. This corrupts chunks and degrades both retrieval quality and generation accuracy. Structured extraction (Unstructured.io) or vision-based approaches (ColPali) would preserve document layout.
+
+---
+
+## Production Roadmap
+
+If extending this system for production use, these are the changes I'd prioritize, in order:
+
+**1. Hybrid Retrieval (FAISS + BM25)** — Add BM25 sparse retrieval alongside FAISS dense retrieval using LangChain's `EnsembleRetriever`. Weight semantic search at 60%, keyword search at 40%. Deduplicate results from both retrievers. This improves recall for exact-term queries without sacrificing semantic understanding.
+
+**2. Cross-Encoder Reranking** — After hybrid retrieval, score each document's relevance using a dedicated cross-encoder model (`cross-encoder/ms-marco-MiniLM-L-6-v2`, ~22MB). This is orders of magnitude faster than LLM-based reranking and trained specifically for the relevance scoring task. Keep top 3 from the reranked list to reduce noise in the LLM's context.
+
+**3. Answer Evaluation with Hallucination Detection** — Add an evaluation node after generation that checks faithfulness (is the answer supported by retrieved context?), completeness (does it address the question?), and confidence (1-10 score). Use the LLM-as-Judge pattern initially, migrate to RAGAS framework (faithfulness, answer relevancy, context precision metrics) for quantitative evaluation.
+
+**4. Conditional Routing & Human-in-the-Loop** — Replace the linear graph with conditional edges. After evaluation, route based on confidence: high confidence → return answer, low confidence or hallucination detected → escalate with a disclaimer directing the user to human support. This is the architectural shift from a linear pipeline to an agentic workflow.
+
+**5. Tiered Safety by Domain** — For multi-domain knowledge bases (e.g., university departments), assign risk levels to document sources. Low-risk topics (IT, general info) tolerate medium-confidence answers. High-risk topics (immigration, legal, financial) require strict confidence thresholds and always include verification disclaimers and source links.
+
+**6. Data Freshness Pipeline** — Implement scheduled re-scraping with content hashing for change detection, diff analysis for identifying what changed, temporal metadata for date-sensitive content, and version history for audit trails. Flag stale content rather than serving outdated answers.
+
+**7. Evaluation Dataset & CI/CD** — Build a test suite of 50+ question-answer pairs with known correct answers. Run the pipeline against this dataset automatically on every code change. Block deploys if accuracy drops below threshold. This is the AI equivalent of unit tests.
 
 ---
 
@@ -62,18 +101,17 @@ User Question
 
 ```
 .
-├── rag_chatbot.ipynb          # Step-by-step RAG tutorial (start here)
-├── app.py                  # Streamlit chatbot with LangGraph
+├── rag_chatbot.ipynb         # Step-by-step RAG pipeline walkthrough
+├── app.py                    # Streamlit chatbot with LangGraph
 ├── data/
-│   ├── Everstorm_Return.pdf
-│   ├── Everstorm_Shipping.pdf
-│   ├── Everstorm_Payment.pdf
-│   └── Everstorm_Product.pdf
-├── faiss_index/            # This will be generated
-│   ├── index.faiss
-│   └── index.pkl
-├── environment.yml         # Conda environment
-├── .gitignore
+│   ├── Everstorm_Return_and_exchange_policy.pdf
+│   ├── Everstorm_Shipping_and_Delivery_Policy.pdf
+│   ├── Everstorm_Payment_refund_and_security.pdf
+│   └── Everstorm_Product_sizing_and_care_guide.pdf
+├── faiss_index/
+│   ├── index.faiss           # Vector embeddings
+│   └── index.pkl             # Document store + ID mappings
+├── environment.yml           # Conda dependencies
 └── README.md
 ```
 
@@ -96,30 +134,23 @@ conda env create -f environment.yml
 conda activate rag-chatbot
 ```
 
-### 2. Start Ollama and pull a model
-
-Open a terminal and start the Ollama server (keep this running):
+### 2. Start Ollama and pull the model
 
 ```bash
 ollama serve
 ```
 
-In a new terminal, pull the model:
+In a new terminal:
 
 ```bash
 ollama pull llama3.1:8b
 ```
 
-> **Note:** The 8B model requires ~5GB of disk space and ~6GB of RAM. If your machine has limited resources, use `gemma3:4b` or `gemma3:1b` instead, and update the model name in `app.py` accordingly.
+> **Note:** The 8B model requires ~5GB disk and ~6GB RAM. For lower-resource machines, use `gemma3:4b` or `gemma3:1b` and update the model name in `app.py`.
 
 ### 3. Build the FAISS index
 
-Open and run `notebook.ipynb` from top to bottom. This will:
-
-- Load the PDF documents from `data/`
-- Chunk the text
-- Generate embeddings using `gte-small`
-- Build and save the FAISS index to `faiss_index/`
+Run `rag_chatbot.ipynb` top to bottom. This loads PDFs, chunks text, generates embeddings with `gte-small`, and saves the FAISS index to `faiss_index/`.
 
 ### 4. Run the chatbot
 
@@ -127,59 +158,13 @@ Open and run `notebook.ipynb` from top to bottom. This will:
 streamlit run app.py
 ```
 
-Open http://localhost:8501 in your browser.
-
----
-
-## How It Works
-
-### Notebook (notebook.ipynb)
-
-The notebook is the learning material. It builds the RAG pipeline incrementally:
-
-**Data Preparation** — Uses `PyPDFLoader` to extract text from Everstorm Outfitters policy documents (synthetic data for learning). Falls back to local PDFs if web URLs are unavailable. Chunks documents using `RecursiveCharacterTextSplitter` with 300-character chunks and 40-character overlap.
-
-**Vector Store** — Embeds chunks using HuggingFace's `gte-small` model (384 dimensions) and indexes them with FAISS. The index is saved locally as `index.faiss` (vectors) and `index.pkl` (document store + ID mapping).
-
-**RAG Pipeline** — Two approaches are implemented side by side:
-- `ManualRAG` — explicit function calls, manual chat history management
-- `LangGraphRAG` — graph-based workflow with shared state, nodes, and edges
-
-Both handle multi-turn conversations through query rewriting: follow-up questions like "how long do I have?" get rewritten as standalone queries using chat history context.
-
-### Streamlit App (app.py)
-
-The app wraps the LangGraph pipeline in a web interface with production-aware patterns:
-
-**Error Handling** — Startup checks verify that both the FAISS index and Ollama connection are available. If either is missing, the app shows a user-friendly warning instead of crashing. Runtime errors during generation are also caught and displayed gracefully.
-
-**Query Rewriting** — When chat history exists, the LLM rewrites follow-up questions into standalone search queries before retrieval. If no history exists, the raw question is used directly to avoid unnecessary LLM calls. A fallback mechanism catches bad rewrites (empty, too long, or multi-line) and reverts to the original question.
-
-**Sliding Window History** — Chat history is capped at the last 10 turns (20 messages) to keep inference fast and prevent context window overflow. The full conversation remains visible in the UI — only the LLM-facing history is trimmed.
-
-**Cached Resources** — The embedding model, FAISS index, LLM connection, and graph are loaded once using `@st.cache_resource`. Streamlit reruns the entire script on every interaction, so caching prevents expensive reloads.
-
-**Session State** — Chat history persists across Streamlit reruns using `st.session_state`. Two lists are maintained: one with LangChain message objects (for LangGraph), one with simple dicts (for Streamlit's chat UI).
-
----
-
-## Key Lessons & Limitations
-
-This project intentionally surfaces real-world RAG challenges:
-
-**Small models struggle with reasoning.** Gemma 1B and even Llama 8B gave incorrect answers to date-comparison questions ("I ordered 40 days ago but received it yesterday — can I return?"). The model would correctly state "30 days from delivery" but then conclude "not eligible." Careful system prompts with explicit logic guidelines help, but don't fully solve this.
-
-**Chunk size matters.** 300-character chunks retrieved the right content but sometimes returned sentence fragments. 800-character chunks provided better context but changed which chunks ranked highest. There's no universal right answer — test with your data.
-
-**Query rewriting is fragile with small models.** The 8B model sometimes answered the question instead of rewriting it, or added assumptions that biased retrieval. Strict prompts with explicit rules help, but a fallback to the original query is essential.
-
-**PDF extraction produces messy text.** Double spaces, broken lines, and lost formatting are common. Cleaning text with regex before embedding improves both retrieval quality and LLM comprehension.
+Open http://localhost:8501.
 
 ---
 
 ## Customization
 
-**Use a different model:**
+**Use a different LLM:**
 
 ```bash
 ollama pull <model-name>
@@ -189,18 +174,18 @@ Update `load_llm()` in `app.py`:
 
 ```python
 def load_llm():
-    return ChatOllama(model="<model-name>", temperature=0.1)
+    return ChatOllama(model="<model-name>", temperature=0)
 ```
 
 **Use a different embedding model:**
 
-Update both the notebook (when building the index) and `load_vectordb()` in `app.py`:
+Update both the notebook and `load_vectordb()` in `app.py`:
 
 ```python
 emb_model = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
 ```
 
-> **Important:** If you change the embedding model, you must rebuild the FAISS index by rerunning the notebook.
+> **Important:** Changing the embedding model requires rebuilding the FAISS index by rerunning the notebook.
 
 **Add your own documents:**
 
@@ -210,13 +195,11 @@ Place PDFs in `data/`, update the glob pattern in `load_offline_files()`, and re
 
 ## Tech Stack
 
-| Component | Tool | Purpose |
-|-----------|------|---------|
-| Embeddings | HuggingFace `gte-small` | Convert text to 384-dim vectors |
-| Vector Store | FAISS | Fast similarity search |
-| LLM | Llama 3.1 8B via Ollama | Local inference, no API keys |
-| Orchestration | LangGraph | Stateful graph-based workflows |
-| Framework | LangChain | Document loading, text splitting, retrieval |
-| UI | Streamlit | Interactive chat interface |
-
----
+| Component | Tool | Why |
+|-----------|------|-----|
+| Embeddings | HuggingFace `gte-small` | 384-dim vectors, runs locally, no API keys |
+| Vector Store | FAISS | Meta's similarity search library — sub-millisecond retrieval |
+| LLM | Llama 3.1 8B via Ollama | Meta's open-source model — local, deterministic, free |
+| Orchestration | LangGraph | Stateful graph with typed state — extensible to conditional routing |
+| Framework | LangChain | Document loading, text splitting, retriever abstraction |
+| UI | Streamlit | Chat interface with session state and resource caching |
