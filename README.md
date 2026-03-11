@@ -1,6 +1,6 @@
 # Customer Support RAG Chatbot
 
-A conversational AI chatbot that answers customer support questions by retrieving relevant information from policy documents. Built with a 3-node LangGraph pipeline using FAISS (Meta's similarity search library) for vector retrieval and Llama 3.1 (Meta's open-source LLM) for generation — fully local, no API keys required.
+A conversational AI chatbot that answers customer support questions by retrieving relevant information from policy documents. Built with a 3-node LangGraph pipeline using FAISS (Meta's similarity search library) for vector retrieval and Llama 3.1 (Meta's open-source LLM) for generation — fully local, no API keys required
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue)
 ![LangChain](https://img.shields.io/badge/LangChain-0.3-green)
@@ -202,4 +202,4 @@ Place PDFs in `data/`, update the glob pattern in `load_offline_files()`, and re
 | LLM | Llama 3.1 8B via Ollama | Meta's open-source model — local, deterministic, free |
 | Orchestration | LangGraph | Stateful graph with typed state — extensible to conditional routing |
 | Framework | LangChain | Document loading, text splitting, retriever abstraction |
-| UI | Streamlit | Chat interface with session state and resource caching |
+| UI | Streamlit | Chat interface with session state and resource caching |`
